@@ -1,0 +1,7 @@
+ollama  # applicaion that can run LLM
+
+langchain-ollama # package that can run AI agents with ollama
+langgraph # tech behine connecting LLM & tools
+langchain # package for creating AI Agents
+fastmcp # package to crate and manage MCP server / app
+langchain_mcp_adapters # this package to import and run MCP tools
