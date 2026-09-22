@@ -1,1 +1,53 @@
+# Existing rule
 */demo/*
+
+# ---- Python virtual environments (huge, machine-specific; recreate with pip install) ----
+.venv/
+venv/
+env/
+ENV/
+
+# ---- Python build / cache artifacts ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+build/
+dist/
+.eggs/
+pip-wheel-metadata/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# ---- AIops runtime data (daemon state, logs, PID, lock files) ----
+.aiops/
+*.log
+*.pid
+
+# ---- Secrets & local config (never commit credentials) ----
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+kubeconfig
+*.kubeconfig
+
+# ---- Editor / OS files ----
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+*:Zone.Identifier
+
+# ---- AI assistant / skills tooling (local, per-machine) ----
+.claude/settings.local.json
+.claude/worktrees/
+.agents/
+skills-lock.json

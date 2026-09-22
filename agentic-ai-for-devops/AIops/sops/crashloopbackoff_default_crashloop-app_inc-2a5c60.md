@@ -7,54 +7,57 @@
 | Severity | high |
 | Category | CrashLoopBackOff |
 | Namespace / Workload | `default` / Deployment `crashloop-app` |
-| Pod / Container | `crashloop-app-65d6fd6868-rdrhx` / `app` |
-| First seen / Last seen | 2026-09-22T21:07:02Z / 2026-09-22T21:07:02Z |
+| Pod / Container | `crashloop-app-65d6fd6868-8ljtf` / `app` |
+| First seen / Last seen | 2026-09-22T22:10:43Z / 2026-09-22T22:10:43Z |
 | Detections | 1 |
 | RCA source / confidence | llm / high |
 
 ## 1. Summary
 
-The pod crashes due to a hardcoded fatal error in the container command. Manual fix required: update the container command to remove the exit 1. Prevention: Ensure container startup commands are robust and do not exit with non-zero codes.
+The app container is configured to exit immediately with error 1. No resource limits are set, but the issue is code-level, not resource-related.
 
 ## 2. Symptoms
 
-- Detection signals: `{'restart_count': 4, 'last_exit_code': 1, 'last_reason': 'Error'}`
+- Detection signals: `{'restart_count': 6, 'last_exit_code': 1, 'last_reason': 'Error'}`
 - Kubernetes events:
-- FailedScheduling: 0/2 nodes are available: 2 node(s) had untolerated taint(s). no new claims to deallocate, preemption: 0/2 nodes are available: 2 Preemption is not helpful for scheduling.
-- Scheduled: Successfully assigned default/crashloop-app-65d6fd6868-rdrhx to aiops-worker
-- Pulling: Pulling image "busybox:1.36"
-- Pulled: Successfully pulled image "busybox:1.36" in 3.28s (3.28s including waiting). Image size: 2217006 bytes.
-- Created: Container created
+- Scheduled: Successfully assigned default/crashloop-app-65d6fd6868-8ljtf to aiops-worker
 - Pulled: Container image "busybox:1.36" already present on machine and can be accessed by the pod
+- Created: Container created
 - Started: Container started
-- BackOff: Back-off restarting failed container app in pod crashloop-app-65d6fd6868-rdrhx_default(07166840-5585-4436-9ca8-69e8b3562c59)
+- BackOff: Back-off restarting failed container app in pod crashloop-app-65d6fd6868-8ljtf_default(d65a72b1-122e-4c2f-8ce7-ccb59dbd7bd2)
 
 ## 3. Root Cause Analysis
 
-The pod is crashing with exit code 1 due to a hardcoded fatal startup error in the container's command. The container's command is `sh -c 'echo 'simulated fatal startup error'; exit 1'`, which immediately terminates the process with code 1. This causes the container to restart repeatedly (restart_count: 6), leading to CrashLoopBackOff.
+The container is failing with a fatal startup error (exit code 1) and restarting repeatedly (6 times) due to a hardcoded command that exits immediately with error 1. This is not an OOM issue or resource allocation problem but a deliberate application error.
 
 ### Evidence
 
-- (none)
+- restart_count: 6
+- last_exit_code: 1
+- last_reason: Error
+- Pulled: Container image "busybox:1.36" already present on machine and can be accessed by the pod
+- Created: Container created
+- Started: Container started
+- BackOff: Back-off restarting failed container app in pod crashloop-app-65d6fd6868-8ljtf_default(d65a72b1-122e-4c2f-8ce7-ccb59dbd7bd2)
 
 ## 4. Diagnose (run these first)
 
 ```bash
-kubectl describe pod crashloop-app-65d6fd6868-rdrhx -n default
-kubectl get events -n default --field-selector involvedObject.name=crashloop-app-65d6fd6868-rdrhx --sort-by=.lastTimestamp
-kubectl logs crashloop-app-65d6fd6868-rdrhx -n default --previous --tail=50
+kubectl describe pod crashloop-app-65d6fd6868-8ljtf -n default
+kubectl get events -n default --field-selector involvedObject.name=crashloop-app-65d6fd6868-8ljtf --sort-by=.lastTimestamp
+kubectl logs crashloop-app-65d6fd6868-8ljtf -n default --previous --tail=50
 ```
 
 ## 5. Resolution
 
 **No automated fix is safe for this failure** -- a human change is required.
 
-- Why: The root cause is a faulty container command that exits immediately with error 1. No automated Kubernetes tool can fix this; it requires manual intervention to correct the container command in the deployment.
+- Why: The container's command explicitly exits with error 1 after printing a message. This is a known application error, not a resource issue. Restarting or scaling won't fix the underlying code problem.
 
 ### Manual remediation steps
 
-- kubectl patch deployment crashloop-app -p '{"spec":{"template":{"spec":{"containers":[{"name":"app","command":["sh","-c","echo 'simulated fatal startup error'" ]}]}]}}' --type=json
-- kubectl rollout status deployment crashloop-app
+- 1. Fix the application code to remove the fatal exit: `kubectl patch deployment crashloop-app -p '{"spec":{"template":{"spec":{"containers":[{"name":"app","command":["sh","-c"],"args":["echo 'simulated fatal startup error'; exit 0"]}]}}}}'`
+- 2. Verify the fix: `kubectl get pod -n default -l app=crashloop-app`
 
 ## 6. Verify
 
@@ -73,8 +76,8 @@ aiops scan --no-llm   # expect this incident to no longer be reported
 
 ## 8. Prevention
 
-- Validate container startup commands with unit tests before deployment
-- Add health checks to detect early failures in container startup
+- Ensure application code does not exit with non-zero status in startup scripts
+- Add liveness probes to catch early failures
 
 ## 9. Timeline
 
@@ -82,6 +85,11 @@ aiops scan --no-llm   # expect this incident to no longer be reported
 |---|---|
 | 2026-09-22T21:07:02Z | Detected: CrashLoopBackOff ({'restart_count': 4, 'last_exit_code': 1, 'last_reason': 'Error'}) |
 | 2026-09-22T21:07:02Z | RCA (llm, high): proposed `no_action` |
+| 2026-09-22T21:55:09Z | Resolved: anomaly no longer detected |
+| 2026-09-22T22:06:49Z | Recurred: CrashLoopBackOff ({'restart_count': 2, 'last_exit_code': 1, 'last_reason': 'Error'}) |
+| 2026-09-22T22:06:49Z | RCA (llm, high): proposed `no_action` |
+| 2026-09-22T22:10:43Z | Recurred: CrashLoopBackOff ({'restart_count': 6, 'last_exit_code': 1, 'last_reason': 'Error'}) |
+| 2026-09-22T22:10:43Z | RCA (llm, high): proposed `no_action` |
 
 ---
 *Generated by AIops (`llm` analysis). Review before acting in any non-local environment.*

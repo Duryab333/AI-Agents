@@ -8,7 +8,7 @@
     aiops incidents               list incidents
     aiops show ID                 print an incident's SOP
     aiops approve ID | reject ID  act on a proposed fix
-    aiops chat                    interactive troubleshooting agent (MCP + LangChain)
+    aiops  (or: aiops chat)       talk to the AIops agent in plain English
 """
 
 from __future__ import annotations
@@ -21,11 +21,9 @@ import subprocess
 import sys
 import time
 
-from aiops import __version__, daemon, engine, k8s, sop
+from aiops import __version__, actions, daemon, engine, k8s, sop
 from aiops.config import Settings
-from aiops.models import ProposedFix
-from aiops.remediation import apply_fix, fix_as_kubectl
-from aiops.state import StateStore, find, now_iso
+from aiops.state import StateStore, find
 
 # ---- argument parsing ----
 
@@ -46,7 +44,7 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="aiops", description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--version", action="version", version=f"aiops {__version__}")
-    sub = parser.add_subparsers(dest="command", required=True)
+    sub = parser.add_subparsers(dest="command")
 
     for name, helptext in [
         ("doctor", "check prerequisites"),
@@ -56,7 +54,7 @@ def parse_args(argv=None) -> argparse.Namespace:
         ("run", "run the watch loop in the foreground"),
         ("scan", "run one scan cycle in the foreground"),
         ("incidents", "list incidents"),
-        ("chat", "interactive troubleshooting agent"),
+        ("chat", "talk to the AIops agent in plain English (default)"),
     ]:
         _common(sub.add_parser(name, help=helptext))
 
@@ -73,7 +71,10 @@ def parse_args(argv=None) -> argparse.Namespace:
         p.add_argument("incident_id")
         if name == "approve":
             p.add_argument("--yes", "-y", action="store_true", help="skip the confirmation prompt")
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.command is None:  # bare `aiops` opens the conversational agent
+        args = parser.parse_args(["chat", *(argv or sys.argv[1:])])
+    return args
 
 
 def build_settings(args: argparse.Namespace) -> Settings:
@@ -176,58 +177,21 @@ def cmd_show(s: Settings, incident_id: str) -> int:
 
 
 def cmd_approve(s: Settings, incident_id: str, assume_yes: bool) -> int:
-    k8s.assert_kind_context()
-    store = StateStore(s.state_file)
-    inc = find(store.load(), incident_id)
-    if not inc:
-        print(f"No incident {incident_id}", file=sys.stderr)
-        return 1
-    if inc["status"] not in ("pending_fix", "fix_failed", "rejected"):
-        print(f"Incident {incident_id} is '{inc['status']}' -- nothing to approve.", file=sys.stderr)
-        return 1
-    fix = ProposedFix.model_validate(inc["rca"]["proposed_fix"])
-    if fix.tool_name == "no_action":
-        print("This incident has no automated fix; follow the SOP's manual steps.", file=sys.stderr)
-        return 1
+    def confirm() -> bool:
+        return assume_yes or input("Apply this fix? [y/N]: ").strip().lower() == "y"
 
-    print(f"Incident {inc['id']}: {inc['category']} in {inc['namespace']}/{inc['workload']}")
-    print(f"Root cause: {inc['rca']['root_cause']}")
-    print(f"Fix:        {fix.tool_name} {fix.args}")
-    print(f"Equivalent: {fix_as_kubectl(fix)}")
-    print(f"Rationale:  {fix.rationale}")
-    if not assume_yes and input("Apply this fix? [y/N]: ").strip().lower() != "y":
-        print("Not applied.")
-        return 0
-
-    result = apply_fix(fix)
-    with store.transaction() as incidents:
-        cur = incidents[inc["key"]]
-        cur["fix_result"] = result
-        cur["status"] = "fix_applied" if result["success"] else "fix_failed"
-        cur["history"].append({"time": now_iso(),
-                               "event": f"Fix {'applied' if result['success'] else 'FAILED'} by operator: "
-                                        f"`{result['command']}`"})
-        path = sop.write_sop(cur, s.sops_dir)
-        sop.write_index(incidents, s.sops_dir)
-    print(("Fix applied: " + result["stdout"]) if result["success"] else ("Fix failed: " + result["stderr"]))
-    print(f"SOP updated: {path}")
-    if result["success"]:
-        print("The daemon will mark the incident resolved once the anomaly clears.")
-    return 0 if result["success"] else 1
+    result = actions.approve(s, incident_id, confirm)
+    if not result["applied"]:
+        print(result["message"])
+        return 0 if "declined" in result["message"] else 1
+    print(f"Fix applied: {result['message']}")
+    print(f"SOP updated: {result['sop']}")
+    print("The daemon will mark the incident resolved once the anomaly clears.")
+    return 0
 
 
 def cmd_reject(s: Settings, incident_id: str) -> int:
-    store = StateStore(s.state_file)
-    with store.transaction() as incidents:
-        inc = find(incidents, incident_id)
-        if not inc:
-            print(f"No incident {incident_id}", file=sys.stderr)
-            return 1
-        inc["status"] = "rejected"
-        inc["history"].append({"time": now_iso(), "event": "Proposed fix rejected by operator"})
-        sop.write_sop(inc, s.sops_dir)
-        sop.write_index(incidents, s.sops_dir)
-    print(f"Rejected fix for {incident_id}; follow the SOP's manual steps.")
+    print(actions.reject(s, incident_id))
     return 0
 
 
@@ -296,7 +260,7 @@ def main(argv=None) -> None:
             code = 0
         else:
             code = 2
-    except (k8s.NotKindClusterError, RuntimeError) as exc:
+    except (k8s.NotKindClusterError, actions.ActionError, RuntimeError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         code = 1
     sys.exit(code)
