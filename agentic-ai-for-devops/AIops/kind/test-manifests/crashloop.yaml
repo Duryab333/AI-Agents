@@ -1,0 +1,20 @@
+# Triggers: CrashLoopBackOff (no whitelisted auto-fix -- agent should propose no_action)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: crashloop-app
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: crashloop-app
+  template:
+    metadata:
+      labels:
+        app: crashloop-app
+    spec:
+      containers:
+        - name: app
+          image: busybox:1.36
+          command: ["sh", "-c", "echo 'simulated fatal startup error'; exit 1"]

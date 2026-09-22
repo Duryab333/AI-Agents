@@ -1,0 +1,23 @@
+# Triggers: Pending / FailedScheduling -- expected fix: patch_resource_limits (lower cpu_request)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: unschedulable-app
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: unschedulable-app
+  template:
+    metadata:
+      labels:
+        app: unschedulable-app
+    spec:
+      containers:
+        - name: app
+          image: nginx:stable
+          resources:
+            requests:
+              cpu: "4"
+              memory: "8Gi"

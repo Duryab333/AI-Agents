@@ -1,0 +1,7 @@
+ollama  # runtime for local LLM inference
+langchain-ollama  # ChatOllama integration
+langgraph  # agent execution graph used under langchain.agents.create_agent
+langchain  # agent framework (create_agent)
+mcp<2.0.0  # MCP server SDK (bundles mcp.server.fastmcp); pinned <2.0 for langchain_mcp_adapters compatibility
+langchain_mcp_adapters  # load MCP tools into LangChain
+pydantic  # structured RCA output validation

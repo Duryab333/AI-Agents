@@ -1,0 +1,19 @@
+# Triggers: ImagePullBackOff / ErrImagePull
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bad-image-app
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: bad-image-app
+  template:
+    metadata:
+      labels:
+        app: bad-image-app
+    spec:
+      containers:
+        - name: app
+          image: nginx:this-tag-does-not-exist-xyz123

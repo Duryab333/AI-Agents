@@ -1,0 +1,7 @@
+ollama>=0.5  # Ollama client: structured-output RCA calls (think=False for Qwen3)
+langchain-ollama>=1.0  # ChatOllama, used by `aiops chat`
+langchain>=1.0  # create_agent, used by `aiops chat`
+langgraph  # agent runtime under langchain.agents
+mcp<2.0.0  # FastMCP server (mcp.server.fastmcp); <2.0 for langchain_mcp_adapters compatibility
+langchain_mcp_adapters  # load MCP tools into LangChain
+pydantic>=2  # RCA schema + validation
