@@ -23,6 +23,7 @@ from langchain_ollama import ChatOllama
 
 from aiops import actions, daemon, engine, sop
 from aiops.config import PROJECT_DIR, Settings
+from aiops.guardrails import PROMPT_RULES, audit, redact
 from aiops.state import StateStore
 
 SYSTEM = """You are AIops, an SRE agent for a local kind Kubernetes cluster. The user talks \
@@ -41,7 +42,11 @@ tool result says applied=true.
 - Background monitoring -> aiops_daemon(action="status"|"start"|"stop").
 
 Incident ids look like inc-1a2b3c; get them from list_incidents or scan_cluster, never invent \
-one. If an incident has no automated fix, give the user its manual steps."""
+one. If an incident has no automated fix, give the user its manual steps.
+
+You have NO tool for Secrets, databases, shell commands, deleting namespaces/deployments/\
+volumes, or editing arbitrary YAML -- if asked, refuse and explain the safe manual approach.
+""" + PROMPT_RULES
 
 
 def _short(inc: dict) -> dict:
@@ -82,12 +87,12 @@ def build_action_tools(settings: Settings) -> list:
         except actions.ActionError as exc:
             return str(exc)
         rca = inc["rca"]
-        return json.dumps({
+        return redact(json.dumps({
             **_short(inc), "summary": rca["summary"], "evidence": rca.get("evidence", [])[:6],
             "proposed_fix": rca["proposed_fix"], "manual_fix_steps": rca.get("manual_fix_steps", []),
             "prevention": rca.get("prevention", []), "analysis_source": rca.get("source"),
             "sop_file": str(settings.sops_dir / sop.sop_filename(inc)),
-        })
+        }))
 
     @tool
     def analyze_incident_with_ai(incident_id: str) -> str:
@@ -199,6 +204,7 @@ async def chat(settings: Settings) -> None:
             continue
 
         history.append({"role": "user", "content": user_input})
+        audit("chat_request", text=user_input[:500])
         print("   (thinking...)")
         final = None
         try:

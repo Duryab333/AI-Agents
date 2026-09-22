@@ -13,6 +13,7 @@ import re
 
 from aiops import k8s
 from aiops.evidence import deployment_resources
+from aiops.guardrails import MAX_REPLICAS, MIN_REPLICAS, audit, check_fix_policy
 from aiops.models import Anomaly, ProposedFix
 
 _CPU_RE = re.compile(r"^\d+(\.\d+)?m?$")
@@ -20,7 +21,6 @@ _MEM_RE = re.compile(r"^\d+(\.\d+)?(Ki|Mi|Gi|Ti|K|M|G|T)?$")
 _MEM_UNITS = {"": 1, "K": 10**3, "M": 10**6, "G": 10**9, "T": 10**12,
               "Ki": 2**10, "Mi": 2**20, "Gi": 2**30, "Ti": 2**40}
 
-MAX_REPLICAS = 10
 
 
 def memory_bytes(q: str) -> int | None:
@@ -54,8 +54,9 @@ def sanitize_fix(fix: ProposedFix, anomaly: Anomaly) -> ProposedFix:
             replicas = int(fix.args.get("replicas"))
         except (TypeError, ValueError):
             return _no_action(f"Model proposed scaling without a valid replica count. {fix.rationale}")
-        if not 0 <= replicas <= MAX_REPLICAS:
-            return _no_action(f"Refusing to scale to {replicas} replicas (allowed 0-{MAX_REPLICAS}).")
+        if not MIN_REPLICAS <= replicas <= MAX_REPLICAS:
+            return _no_action(f"Refusing to scale to {replicas} replicas (allowed "
+                              f"{MIN_REPLICAS}-{MAX_REPLICAS}; scaling to 0 is an outage).")
         args.update(deployment_name=deployment, replicas=replicas)
     elif fix.tool_name == "patch_resource_limits":
         containers = list(deployment_resources(anomaly.namespace, deployment))
@@ -78,6 +79,10 @@ def sanitize_fix(fix: ProposedFix, anomaly: Anomaly) -> ProposedFix:
         if not any(k in args for k in ("cpu_request", "cpu_limit", "memory_request", "memory_limit")):
             return _no_action(f"Model proposed patching resources but gave no values. {fix.rationale}")
 
+    blocked = check_fix_policy(fix.tool_name, args)
+    if blocked:
+        audit("fix_blocked_by_policy", tool=fix.tool_name, args=args, reason=blocked)
+        return _no_action(f"Blocked by guardrail: {blocked}. Original proposal: {fix.rationale}")
     return ProposedFix(tool_name=fix.tool_name, args=args, rationale=fix.rationale)
 
 

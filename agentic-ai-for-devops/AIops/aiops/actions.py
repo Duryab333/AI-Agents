@@ -12,6 +12,7 @@ from typing import Callable
 
 from aiops import k8s, rca as rca_mod, sop
 from aiops.config import Settings
+from aiops.guardrails import audit, check_fix_policy
 from aiops.models import Anomaly, ProposedFix
 from aiops.remediation import apply_fix, fix_as_kubectl
 from aiops.state import StateStore, find, now_iso
@@ -55,11 +56,22 @@ def approve(settings: Settings, incident_id: str, confirm: Callable[[], bool]) -
         raise ActionError(f"Incident {inc['id']} has no automated fix; a human must follow "
                           "the SOP's manual steps.")
 
+    # Re-check at execution time: the stored fix could have been edited since it was proposed.
+    blocked = check_fix_policy(fix.tool_name, fix.args)
+    if blocked or fix.args.get("namespace") != inc["namespace"]:
+        reason = blocked or "fix targets a different namespace than the incident"
+        audit("fix_blocked_by_policy", incident=inc["id"], tool=fix.tool_name, args=fix.args, reason=reason)
+        raise ActionError(f"Blocked by guardrail: {reason}.")
+
     print(describe_fix(inc))
     if not confirm():
+        audit("fix_declined", incident=inc["id"], tool=fix.tool_name, args=fix.args)
         return {"applied": False, "message": "Operator declined; nothing was changed."}
 
     result = apply_fix(fix)
+    audit("fix_applied" if result["success"] else "fix_failed", incident=inc["id"],
+          tool=fix.tool_name, args=fix.args, command=result["command"],
+          error=None if result["success"] else result["stderr"])
     store = StateStore(settings.state_file)
     with store.transaction() as incidents:
         cur = incidents[inc["key"]]
@@ -82,6 +94,7 @@ def reject(settings: Settings, incident_id: str) -> str:
         if not inc:
             raise ActionError(f"No incident with id '{incident_id}'.")
         inc["status"] = "rejected"
+        audit("fix_rejected", incident=inc["id"])
         inc["history"].append({"time": now_iso(), "event": "Proposed fix rejected by operator"})
         sop.write_sop(inc, settings.sops_dir)
         sop.write_index(incidents, settings.sops_dir)
