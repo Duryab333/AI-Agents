@@ -3,46 +3,50 @@
 | Field | Value |
 |---|---|
 | Incident ID | `inc-f51d68` |
-| Status | 🟡 Fix proposed -- awaiting approval |
+| Status | 🔵 Fix applied -- verifying |
 | Severity | high |
 | Category | OOMKilled |
 | Namespace / Workload | `default` / Deployment `oom-app` |
-| Pod / Container | `oom-app-5f9d576ff9-p47h8` / `app` |
-| First seen / Last seen | 2026-09-22T21:12:14Z / 2026-09-22T21:12:14Z |
+| Pod / Container | `oom-app-5f9d576ff9-sm4t6` / `app` |
+| First seen / Last seen | 2026-09-22T22:18:17Z / 2026-09-22T22:18:17Z |
 | Detections | 1 |
 | RCA source / confidence | llm / high |
 
 ## 1. Summary
 
-The pod is being OOMKilled due to insufficient memory limit (50Mi) for the 'stress' workload. Increasing the memory limit to 200Mi will prevent OOMKills. This fix ensures the container has enough memory to run the 'stress' command without hitting the limit.
+The app container is OOMKilled because its memory limit (50Mi) is too low for the stress workload (150M). Patching the memory limit to 200Mi resolves the issue. Prevent recurrence by setting memory limits based on actual workload needs.
 
 ## 2. Symptoms
 
-- Detection signals: `{'restart_count': 4}`
+- Detection signals: `{'restart_count': 6}`
 - Kubernetes events:
-- Pulled: Successfully pulled image "polinux/stress" in 739ms (739ms including waiting). Image size: 4041495 bytes.
-- Pulled: Successfully pulled image "polinux/stress" in 834ms (834ms including waiting). Image size: 4041495 bytes.
-- Pulled: Successfully pulled image "polinux/stress" in 902ms (902ms including waiting). Image size: 4041495 bytes.
-- Pulling: Pulling image "polinux/stress"
+- Pulled: Successfully pulled image "polinux/stress" in 711ms (712ms including waiting). Image size: 4041495 bytes.
+- Pulled: Successfully pulled image "polinux/stress" in 756ms (756ms including waiting). Image size: 4041495 bytes.
 - Created: Container created
-- Pulled: Successfully pulled image "polinux/stress" in 760ms (760ms including waiting). Image size: 4041495 bytes.
 - Started: Container started
-- BackOff: Back-off restarting failed container app in pod oom-app-5f9d576ff9-p47h8_default(8aec63da-3670-4f6c-8a2f-1e0c429c06be)
+- Pulled: Successfully pulled image "polinux/stress" in 712ms (712ms including waiting). Image size: 4041495 bytes.
+- Pulling: Pulling image "polinux/stress"
+- Pulled: Successfully pulled image "polinux/stress" in 704ms (704ms including waiting). Image size: 4041495 bytes.
+- BackOff: Back-off restarting failed container app in pod oom-app-5f9d576ff9-sm4t6_default(de07eff2-f97d-419c-95b7-3a44f731b48f)
 
 ## 3. Root Cause Analysis
 
-The pod is being OOMKilled because the memory limit (50Mi) is too low for the workload. The 'stress' container is repeatedly exceeding its memory limit, causing restarts (restart_count: 7). The evidence shows the container is running with a memory limit of 50Mi, but the 'stress' command is consuming significantly more memory than this limit.
+The container's memory limit (50Mi) is too low for the workload, causing OOMKilled events. The stress command is using 150M of memory (as seen in the command args: `--vm-bytes 150M`), which exceeds the 50Mi limit.
 
 ### Evidence
 
-- (none)
+- restart_count: 6
+- Pulled: Successfully pulled image "polinux/stress" in 712ms (712ms including waiting). Image size: 4041495 bytes.
+- Pulling: Pulling image "polinux/stress"
+- Pulled: Successfully pulled image "polinux/stress" in 704ms (704ms including waiting). Image size: 4041495 bytes.
+- BackOff: Back-off restarting failed container app in pod oom-app-5f9d576ff9-sm4t6_default(de07eff2-f97d-419c-95b7-3a44f731b48f)
 
 ## 4. Diagnose (run these first)
 
 ```bash
-kubectl describe pod oom-app-5f9d576ff9-p47h8 -n default
-kubectl get events -n default --field-selector involvedObject.name=oom-app-5f9d576ff9-p47h8 --sort-by=.lastTimestamp
-kubectl logs oom-app-5f9d576ff9-p47h8 -n default --previous --tail=50
+kubectl describe pod oom-app-5f9d576ff9-sm4t6 -n default
+kubectl get events -n default --field-selector involvedObject.name=oom-app-5f9d576ff9-sm4t6 --sort-by=.lastTimestamp
+kubectl logs oom-app-5f9d576ff9-sm4t6 -n default --previous --tail=50
 ```
 
 ## 5. Resolution
@@ -50,7 +54,7 @@ kubectl logs oom-app-5f9d576ff9-p47h8 -n default --previous --tail=50
 **Automated fix (whitelisted, validated):** `patch_resource_limits`
 
 - Arguments: `{'namespace': 'default', 'deployment_name': 'oom-app', 'container_name': 'app', 'memory_limit': '200Mi'}`
-- Why: The current memory limit (50Mi) is insufficient for the 'stress' workload. The 'stress' command is designed to consume memory, and the pod is being OOMKilled repeatedly. We need to increase the memory limit to a value that comfortably accommodates the workload (typically 2-4x the current limit). Based on the evidence, the container is running with a memory limit of 50Mi, so increasing it to 200Mi (4x) provides a safe buffer for the workload to avoid OOMKills.
+- Why: The memory limit is too low (50Mi) for the stress workload which uses 150M. Patching to 200Mi (2x the current limit) ensures sufficient memory without causing node pressure.
 
 Apply it with AIops (recommended -- records the result in this SOP):
 
@@ -67,6 +71,12 @@ kubectl set resources deployment/oom-app -n default -c app --limits=memory=200Mi
 ### Manual remediation steps
 
 - kubectl patch deployment oom-app -p '{"spec": {"template": {"spec": {"containers": [{"name": "app", "resources": {"limits": {"memory": "200Mi"}}]}}}}}' --type=json
+
+### Fix execution result
+
+- Command: `kubectl patch deployment oom-app -n default --type strategic -p {"spec": {"template": {"spec": {"containers": [{"name": "app", "resources": {"limits": {"memory": "200Mi"}}}]}}}}`
+- Success: True
+- Output: `deployment.apps/oom-app patched`
 
 ## 6. Verify
 
@@ -85,7 +95,7 @@ kubectl rollout undo deployment/oom-app -n default
 
 ## 8. Prevention
 
-- Always set memory limits to at least 2-4x the expected peak memory usage for memory-intensive workloads. For 'stress' commands, use the `--vm` option with a high enough memory value to avoid OOMKills.
+- Always set memory limits based on actual workload usage (e.g., use `stress --vm-bytes 150M` to calculate required memory).
 
 ## 9. Timeline
 
@@ -93,6 +103,13 @@ kubectl rollout undo deployment/oom-app -n default
 |---|---|
 | 2026-09-22T21:12:14Z | Detected: OOMKilled ({'restart_count': 4}) |
 | 2026-09-22T21:12:14Z | RCA (llm, high): proposed `patch_resource_limits` |
+| 2026-09-22T21:30:14Z | Fix applied by operator: `kubectl patch deployment oom-app -n default --type strategic -p {"spec": {"template": {"spec": {"containers": [{"name": "app", "resources": {"limits": {"memory": "200Mi"}}}]}}}}` |
+| 2026-09-22T21:31:55Z | Resolved: anomaly no longer detected |
+| 2026-09-22T22:13:37Z | Recurred: OOMKilled ({'restart_count': 8}) |
+| 2026-09-22T22:13:37Z | RCA (heuristic, medium): proposed `patch_resource_limits` |
+| 2026-09-22T22:18:17Z | Recurred: OOMKilled ({'restart_count': 6}) |
+| 2026-09-22T22:18:17Z | RCA (llm, high): proposed `patch_resource_limits` |
+| 2026-09-22T22:32:20Z | Fix applied by operator: `kubectl patch deployment oom-app -n default --type strategic -p {"spec": {"template": {"spec": {"containers": [{"name": "app", "resources": {"limits": {"memory": "200Mi"}}}]}}}}` |
 
 ---
 *Generated by AIops (`llm` analysis). Review before acting in any non-local environment.*

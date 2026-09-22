@@ -1,184 +1,313 @@
-# AIops -- background AIOps for Kubernetes on kind
+# AIops
 
-`aiops` is a CLI that runs **in the background**. It watches a local
-[kind](https://kind.sigs.k8s.io/) Kubernetes cluster and does the following for every problem
-it finds:
+A CLI that runs **in the background** next to a local Kubernetes ([kind](https://kind.sigs.k8s.io/))
+cluster. It does four things:
 
-1. **Auto-detects the anomaly.** Checks cover CrashLoopBackOff, OOMKilled, ImagePullBackOff,
-   unschedulable pods, config errors, stuck containers, probe failures, high restart counts
-   and NotReady nodes.
-2. **Generates an RCA** (root-cause analysis) with a local **Qwen** model through
+1. **Detects** broken pods and nodes automatically.
+2. **Explains** why each one broke (root-cause analysis) using a local **Qwen** model in
    [Ollama](https://ollama.com).
-3. **Creates a solution.** This is one validated, whitelisted automated fix, or exact manual
-   steps when no automated fix is safe.
-4. **Writes a ready-to-use SOP** in Markdown, one per incident. `sops/README.md` is the index.
+3. **Proposes a fix.** Nothing is changed until you approve it.
+4. **Writes an SOP**, a ready-to-use Markdown runbook, for every incident in `sops/`.
 
-It follows the same Ollama, LangChain and MCP pattern as
-[`docker-agent`](../../docker-agent), turned into a background service.
+---
 
-## Architecture
-
-```
-            aiops start  ──►  background daemon (python -m aiops run), every N seconds:
-                                        │
-  kubectl get pods/events/nodes (JSON)  ▼
-                            ┌───────────────────────┐
-                            │ detector.py           │  deterministic, no LLM
-                            │ -> Anomaly records    │  (a healthy cluster costs 0 LLM calls)
-                            └──────────┬────────────┘
-                     new incident?     │ dedup by namespace/workload/category (state.py)
-                                       ▼
-                            ┌───────────────────────┐
-                            │ evidence.py           │  describe, events, logs (--previous),
-                            │                       │  resource specs, node allocatable
-                            └──────────┬────────────┘
-                                       ▼
-                            ┌───────────────────────┐
-                            │ rca.py -> Ollama Qwen │  ONE structured JSON call (think=off)
-                            │  + rule-based fallback│  if the LLM is down or returns junk
-                            └──────────┬────────────┘
-                                       ▼
-                            ┌───────────────────────┐
-                            │ remediation.py        │  pins targets to the real workload,
-                            │  sanitize_fix()       │  validates quantities, clamps replicas
-                            └──────────┬────────────┘
-                                       ▼
-                 sops/<category>_<ns>_<workload>_<id>.md  +  sops/README.md index
-                                       │
-            status = pending_fix ──► you: `aiops approve <id>` ──► kubectl (whitelisted)
-                                       │
-            anomaly gone for 2 scans ──► status = resolved, SOP updated
-```
-
-### Safety model
-
-- **Detection is plain code.** The LLM never decides what counts as broken.
-- **The daemon never changes the cluster.** A proposed fix is queued as `pending_fix`.
-  Only `aiops approve <id>`, run by a person, applies it.
-- **Only four fix actions exist:** `restart_deployment`, `delete_pod`,
-  `scale_deployment` (0-10 replicas) and `patch_resource_limits`. There is no "run any
-  kubectl" tool anywhere.
-- **Fix targets are pinned.** Before a fix is stored, the namespace, deployment, pod and
-  container are overwritten with the ones that were actually detected. A hallucinated
-  target can't touch a different workload.
-- **Some model mistakes are corrected.** For example, an OOM fix that wouldn't actually
-  raise the memory limit is replaced.
-- **It only runs against kind clusters.** It refuses any kubectl context that doesn't start
-  with `kind-`.
-- **`aiops chat` is read-only.** Its MCP server has no tool that changes anything.
-
-### Why RCA is a single LLM call
-
-On a CPU-only laptop, a small model driving a tool-calling loop takes 5-15 minutes per
-incident. AIops collects the evidence itself and asks Qwen once, with a JSON schema
-(`format=`) and thinking turned off. That takes about 1-3 minutes on CPU and always
-includes the logs.
-
-## Setup
-
-Prerequisites: Docker, `kind`, `kubectl`, Ollama, Python 3.10+.
+## Quick start (already set up?)
 
 ```bash
-# 1. Local cluster
+cd ~/AI-Agents/agentic-ai-for-devops/AIops
+source .venv/bin/activate
+
+aiops doctor      # check everything is ready
+aiops start       # start the background daemon
+aiops status      # see incidents and fixes waiting for you
+```
+
+> ⚠️ Don't run `python aiops/cli.py`. It's part of a package, not a script, so it won't
+> work. Always use the `aiops` command after activating `.venv`, or `.venv/bin/aiops ...`.
+
+---
+
+## First-time setup
+
+### Step 0: What you need
+
+| Tool | Check it's installed | Install |
+|---|---|---|
+| Docker | `docker ps` | Docker Desktop (with WSL integration on Windows) |
+| kind | `kind version` | https://kind.sigs.k8s.io/docs/user/quick-start/#installation |
+| kubectl | `kubectl version --client` | https://kubernetes.io/docs/tasks/tools/ |
+| Ollama | `ollama --version` | `curl -fsSL https://ollama.com/install.sh \| sh` |
+| Python 3.10+ | `python3 --version` | your OS package manager |
+
+**RAM:** use a model that fits in memory. With about 8 GB of RAM, use `qwen3:4b` (the
+default). Larger models like `gemma4:26b` (18 GB) won't load and will just hang.
+
+### Step 1: Start Ollama and download the Qwen model
+
+```bash
+ollama serve > /dev/null 2>&1 &     # skip if Ollama already runs as a service
+ollama pull qwen3:4b                # ~2.5 GB, one time only
+```
+
+✅ Check: `ollama list` shows `qwen3:4b`.
+
+### Step 2: Create the Kubernetes cluster
+
+```bash
+cd ~/AI-Agents/agentic-ai-for-devops/AIops
 kind create cluster --name aiops --config kind/cluster-config.yaml
+```
 
-# 2. Ollama + a Qwen model (qwen3:4b fits in ~4 GB RAM; use qwen3:8b/14b if you have more)
-ollama serve &
-ollama pull qwen3:4b
+✅ Check: `kubectl config current-context` prints `kind-aiops`.
 
-# 3. Install the CLI
-python3 -m venv .venv && source .venv/bin/activate
+### Step 3: Install AIops
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -e .
+```
 
-# 4. Check everything
+✅ Check: `aiops --version` prints `aiops 0.1.0`.
+
+### Step 4: Verify everything
+
+```bash
 aiops doctor
 ```
 
-## Usage
+Every line should say `[OK]`:
 
-```bash
-aiops start                 # start the background daemon (scans every 60s)
-aiops status                # daemon state, incident counts, fixes awaiting approval
-aiops logs -f               # follow what the daemon is doing
-aiops incidents             # list incidents
-aiops show inc-1a2b3c       # print an incident's SOP
-aiops approve inc-1a2b3c    # review + apply its proposed fix (asks y/N)
-aiops reject inc-1a2b3c     # decline it; follow the SOP's manual steps
-aiops stop                  # stop the daemon
-
-aiops scan                  # one cycle in the foreground (no daemon)
-aiops run                   # the daemon loop in the foreground (Ctrl+C to stop)
-aiops chat                  # ask questions about the cluster (MCP + LangChain agent)
+```
+AIops doctor
+  [OK] kubectl installed
+  [OK] kind installed
+  [OK] kubectl context is a kind cluster -- kind-aiops
+  [OK] cluster reachable -- ...
+  [OK] Ollama reachable at http://localhost:11434
+  [OK] model 'qwen3:4b' pulled
+  [INFO] daemon: not running
 ```
 
-Common flags (all commands): `--model`, `--namespace/-n`, `--interval`, `--no-llm`
-(rule-based RCA only), `--restart-threshold`, `--include-system-namespaces`, `--home`,
-`--sops-dir`.
+Setup is done. 🎉
 
-| Env var | Default | Meaning |
-|---|---|---|
-| `AIOPS_MODEL` | `qwen3:4b` | Ollama model used for RCA and chat |
-| `OLLAMA_HOST` | `http://localhost:11434` | Ollama server |
-| `AIOPS_INTERVAL` | `60` | Seconds between daemon scans |
-| `AIOPS_LLM_TIMEOUT` | `600` | Per-request LLM timeout (falls back to rules) |
-| `AIOPS_NUM_CTX` | `8192` | Model context window |
-| `AIOPS_HOME` | `./.aiops` | State, log and PID files |
-| `AIOPS_SOPS_DIR` | `./sops` | Where SOPs are written |
+---
 
-## Demo
+## Try the demo (about 20 minutes, mostly waiting)
+
+**1. Break some things on purpose.** This deploys 4 deliberately broken apps:
 
 ```bash
-kubectl apply -f kind/test-manifests/     # 4 deliberately broken workloads
+kubectl apply -f kind/test-manifests/
+```
+
+**2. Start AIops in the background:**
+
+```bash
 aiops start
-aiops logs -f                             # watch detection + RCA (a few minutes on CPU)
-aiops status                              # -> e.g. "aiops approve inc-xxxxxx  # OOMKilled ..."
-aiops approve <oom-incident-id>           # raises the memory limit
-aiops approve <pending-incident-id>       # lowers the oversized requests
-# ~2 scans later both incidents flip to "resolved" and their SOPs are updated
-cat sops/README.md
 ```
 
-| Manifest | Detected as | Expected solution |
+**3. Watch it work.** Press `Ctrl+C` to stop watching; the daemon keeps running:
+
+```bash
+aiops logs -f
+```
+
+On a CPU-only machine each diagnosis takes about 3-5 minutes. You'll see lines like:
+
+```
+[3/4] RCA for OOMKilled in default/oom-app (model: qwen3:4b) ...
+    -> inc-f51d68: The pod is being OOMKilled because the memory limit (50Mi) is too low...
+    -> proposed: patch_resource_limits  | SOP: .../sops/oomkilled_default_oom-app_inc-f51d68.md
+```
+
+**4. See what it found:**
+
+```bash
+aiops status
+```
+
+```
+Incidents: open=2, pending_fix=2
+
+Fixes awaiting approval:
+  aiops approve inc-f51d68   # OOMKilled in default/oom-app
+  aiops approve inc-077283   # PendingUnschedulable in default/unschedulable-app
+```
+
+**5. Read the SOP, then approve a fix:**
+
+```bash
+aiops show inc-f51d68       # full runbook: root cause, fix, verify, rollback
+aiops approve inc-f51d68    # shows the exact change, asks "Apply this fix? [y/N]"
+```
+
+**6. Watch it resolve.** About 2 minutes later, `aiops incidents` shows the incident as
+`resolved`, and its SOP gets a timeline entry.
+
+| Demo app | What AIops finds | What it proposes |
 |---|---|---|
-| `bad-image.yaml` | ImagePullBackOff | manual: fix the image tag (`no_action`) |
-| `crashloop.yaml` | CrashLoopBackOff | manual: fix the app error in the logs (`no_action`) |
-| `oom.yaml` | OOMKilled | `patch_resource_limits` (raise memory limit) |
-| `pending-unschedulable.yaml` | PendingUnschedulable | `patch_resource_limits` (lower requests) |
+| `bad-image-app` | image tag doesn't exist | manual fix: correct the image tag |
+| `crashloop-app` | the app's command exits with an error | manual fix: correct the command |
+| `oom-app` | memory limit too low | **auto fix:** raise the memory limit |
+| `unschedulable-app` | asks for more memory than a node has | **auto fix:** lower the request |
 
-Clean up: `aiops stop && kind delete cluster --name aiops`.
+---
 
-## What each SOP contains
+## Talk to it in plain English 💬
 
-Summary, symptoms, root cause and evidence, **diagnose** commands, **resolution** (the
-automated fix, its `aiops approve` command, the equivalent `kubectl` command and the manual
-steps), **verify**, **rollback**, **prevention**, and a timeline of the incident. The SOP is
-re-rendered whenever the incident's status changes.
-
-## Project layout
+Just type `aiops` to open the conversational agent:
 
 ```
-aiops/
-  cli.py          argparse entry point (`aiops ...`)
-  daemon.py       start/stop/status + watch loop
-  engine.py       one detect -> RCA -> SOP cycle, dedup, auto-resolve
-  detector.py     deterministic anomaly detection
-  evidence.py     collects describe/events/logs/resources for the RCA
-  rca.py          Ollama Qwen structured RCA + rule-based fallback + guardrails
-  remediation.py  fix validation (sanitize_fix) and whitelisted execution
-  sop.py          SOP + index Markdown rendering
-  state.py        locked JSON incident store
-  k8s.py          kubectl wrapper (the only place kubectl is called)
-  mcp_server.py   read-only FastMCP tools for `aiops chat`
-  chat.py         LangChain + ChatOllama troubleshooting agent
-kind/             cluster config + broken test workloads
-sops/             generated SOPs
+$ aiops
+AIops agent ready (model qwen3:4b). Talk to it in plain English...
+
+You: is anything broken in my cluster?
+   ⚙  scan_cluster()
+AIops: 1 problem found: oom-app is OOMKilled (memory limit 50Mi too low).
+       Proposed fix: raise the memory limit (incident inc-f51d68).
+
+You: fix it
+   ⚙  apply_fix(incident_id='inc-f51d68')
+Incident inc-f51d68: OOMKilled in default/oom-app
+Fix:        patch_resource_limits {... 'memory_limit': '256Mi'}
+   >>> Apply this fix? [y/N]: y
+AIops: Done. The memory limit of oom-app was raised; it should be healthy in a minute.
 ```
 
-## Limitations
+Things you can say:
 
-- It's built for local kind clusters. Watching is polling (`kubectl` every interval), not
-  the Kubernetes watch API.
-- It covers pod- and node-level failures. It doesn't analyze metrics or logs
-  (no Prometheus or Loki).
-- A small CPU-only model can still misdiagnose. Every SOP records whether its RCA came from
-  the LLM or the rules, plus a confidence level. Review a fix before approving it.
+| You say | The agent does |
+|---|---|
+| "is anything broken?" / "scan the cluster" | detects anomalies, runs RCA and writes SOPs (fast rules) |
+| "do a deep AI analysis of inc-xxxx" | re-analyzes that incident with Qwen (takes minutes) |
+| "what's wrong?" / "list incidents" | lists open incidents |
+| "why is oom-app failing?" | explains the root cause, evidence and fix |
+| "fix it" / "apply the fix for oom-app" | applies the fix, **after you type `y`** |
+| "don't fix that" | rejects the proposed fix |
+| "show logs of crashloop-app" / "describe pod X" | reads the cluster (read-only) |
+| "start background monitoring" / "stop monitoring" | starts or stops the daemon |
+
+🔒 The agent can't change your cluster without you. Every fix stops at a
+`Apply this fix? [y/N]` prompt in your terminal. That prompt is code, not the AI.
+
+⏱️ On a CPU-only machine each reply takes about 30s-2min, while Qwen thinks.
+
+---
+
+## Everyday commands
+
+| Command | What it does |
+|---|---|
+| `aiops start` | Start the background daemon (scans every 60s) |
+| `aiops stop` | Stop the daemon |
+| `aiops status` | Is it running? Which fixes are waiting? |
+| `aiops logs -f` | Follow the daemon's log |
+| `aiops incidents` | List all incidents |
+| `aiops show <id>` | Print an incident's SOP |
+| `aiops approve <id>` | Apply the proposed fix (asks y/N) |
+| `aiops reject <id>` | Decline the fix (follow the SOP's manual steps) |
+| `aiops scan` | Run one scan in the foreground instead of the daemon |
+| `aiops scan --no-llm` | Fast scan using built-in rules only (seconds, no Ollama) |
+| `aiops` (or `aiops chat`) | Talk to the agent in plain English |
+| `aiops doctor` | Check prerequisites |
+| `aiops --help` | All commands and options |
+
+Useful options: `--model qwen3:8b`, `--namespace myapp`, `--interval 120`, `--no-llm`.
+
+---
+
+## Where things are
+
+| Path | Contents |
+|---|---|
+| `sops/README.md` | **Index of all incidents**, with links to each SOP |
+| `sops/*.md` | One SOP per incident |
+| `.aiops/aiops.log` | Daemon log |
+| `.aiops/state.json` | Incident database |
+
+Each SOP contains: summary · symptoms · root cause and evidence · diagnose commands ·
+fix (the `aiops approve` command and the equivalent `kubectl` command) · verify ·
+rollback · prevention · timeline.
+
+---
+
+## Stop and clean up
+
+```bash
+aiops stop                           # stop the daemon
+kind delete cluster --name aiops     # delete the cluster
+```
+
+Start again later with Step 2 of the setup, then `aiops start`.
+
+---
+
+## Troubleshooting
+
+| Problem | Fix |
+|---|---|
+| `python aiops/cli.py` does nothing or errors | Use `aiops ...` after `source .venv/bin/activate` (see Quick start). |
+| `aiops: command not found` | Activate the venv: `source .venv/bin/activate`, or use `.venv/bin/aiops`. |
+| `Refusing to run ... not a kind cluster` | `kubectl config use-context kind-aiops`. If there's no cluster, do Step 2. AIops only works on kind clusters, on purpose. |
+| `doctor`: Ollama not reachable | Run `ollama serve &`. |
+| `doctor`: model not pulled | Run `ollama pull qwen3:4b`. |
+| Ollama error `llama-server binary not found` | The Ollama install is broken. Reinstall with `curl -fsSL https://ollama.com/install.sh \| sh`. |
+| RCA hangs or never finishes | The model is too big for your RAM. Use `qwen3:4b` (`--model qwen3:4b`) or run `aiops start --no-llm`. |
+| RCA is slow (minutes) | Normal on CPU. After 10 minutes AIops falls back to rule-based analysis automatically. |
+| `daemon already running` | `aiops stop`, then `aiops start`. |
+| No incidents found | Wait 1-2 minutes after deploying. Pods need time to fail. Check with `kubectl get pods`. |
+
+---
+
+## How it works
+
+```
+aiops start ─► background daemon, every 60s:
+
+  kubectl (pods, events, nodes)
+      │
+      ▼
+  detector.py      finds anomalies with plain code (no AI = fast, free, reliable)
+      │  new problem? (each problem is analyzed once, not every scan)
+      ▼
+  evidence.py      collects describe, events, logs, resource settings
+      ▼
+  rca.py           ONE request to Qwen for root cause and fix (falls back to rules on failure)
+      ▼
+  remediation.py   safety checks: fix can only target the broken workload, sane values
+      ▼
+  sop.py           writes sops/<incident>.md and sops/README.md
+      ▼
+  you: aiops approve <id>  ─►  kubectl applies the fix  ─►  daemon marks it resolved
+```
+
+**Safety:**
+- The daemon **never** changes your cluster on its own. Every fix needs `aiops approve`.
+- There are only 4 possible fix actions: restart a deployment, delete a pod, scale a
+  deployment (0-10 replicas), or change CPU/memory settings.
+- Fixes are locked to the workload that is actually broken, so the AI can't target
+  something else.
+- AIops refuses to run against anything that isn't a local `kind-*` cluster.
+- The chat agent uses the same `approve` code path, so the fix is validated and you
+  must type `y` in the terminal. Its kubectl tools (logs, describe, events) are read-only.
+
+**Code layout** (`aiops/`): `cli.py` (commands), `daemon.py` (background loop),
+`engine.py` (one scan cycle), `detector.py`, `evidence.py`, `rca.py`, `remediation.py`,
+`sop.py`, `state.py`, `k8s.py` (the only place kubectl is called), `mcp_server.py` +
+`chat.py` (chat agent, same pattern as `../../docker-agent`).
+
+**Settings** (environment variables):
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `AIOPS_MODEL` | `qwen3:4b` | Ollama model |
+| `OLLAMA_HOST` | `http://localhost:11434` | Ollama address |
+| `AIOPS_INTERVAL` | `60` | Seconds between scans |
+| `AIOPS_LLM_TIMEOUT` | `600` | Max seconds per AI request before falling back to rules |
+| `AIOPS_HOME` | `./.aiops` | Log, state and PID files |
+| `AIOPS_SOPS_DIR` | `./sops` | Where SOPs go |
+
+**Limitations:** it's built for local kind clusters only. It checks pods and nodes, not
+metrics or app logs. A small model can still get things wrong, so read the SOP before
+approving a fix.

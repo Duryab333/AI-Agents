@@ -7,44 +7,44 @@
 | Severity | high |
 | Category | PendingUnschedulable |
 | Namespace / Workload | `default` / Deployment `unschedulable-app` |
-| Pod / Container | `unschedulable-app-d49957787-jlb9k` / `(pod-level)` |
-| First seen / Last seen | 2026-09-22T21:15:52Z / 2026-09-22T21:15:55Z |
-| Detections | 2 |
-| RCA source / confidence | llm / high |
+| Pod / Container | `unschedulable-app-d49957787-dg94w` / `(pod-level)` |
+| First seen / Last seen | 2026-09-22T22:28:19Z / 2026-09-22T22:28:19Z |
+| Detections | 1 |
+| RCA source / confidence | heuristic / medium |
 
 ## 1. Summary
 
-The pod's memory request (8Gi) exceeds the node's allocatable memory (8Gi), causing unschedulable. Reduce memory request to 7.5Gi to fit within node capacity. Prevent recurrence by ensuring memory requests are below node allocatable memory.
+No node can satisfy the pod's resource requests: 0/2 nodes are available: 1 Insufficient cpu, 1 Insufficient memory, 1 node(s) had untolerated taint(s). no new claims to deallocate, preemption: 0/2 nodes are available: 2 Preemption is not helpful for scheduling. (Rule-based analysis: LLM failed: ReadTimeout: timed out.)
 
 ## 2. Symptoms
 
-- Detection signals: `{'message': '0/2 nodes are available: 1 Insufficient memory, 1 node(s) had untolerated taint(s). no new claims to deallocate, preemption: 0/2 nodes are available: 2 Preemption is not helpful for scheduling.'}`
+- Detection signals: `{'message': '0/2 nodes are available: 1 Insufficient cpu, 1 Insufficient memory, 1 node(s) had untolerated taint(s). no new claims to deallocate, preemption: 0/2 nodes are available: 2 Preemption is not helpful for scheduling.'}`
 - Kubernetes events:
-- FailedScheduling: 0/2 nodes are available: 2 node(s) had untolerated taint(s). no new claims to deallocate, preemption: 0/2 nodes are available: 2 Preemption is not helpful for scheduling.
-- FailedScheduling: 0/2 nodes are available: 1 Insufficient memory, 1 node(s) had untolerated taint(s). no new claims to deallocate, preemption: 0/2 nodes are available: 2 Preemption is not helpful for scheduling.
+- FailedScheduling: 0/2 nodes are available: 1 Insufficient cpu, 1 Insufficient memory, 1 node(s) had untolerated taint(s). no new claims to deallocate, preemption: 0/2 nodes are available: 2 Preemption is not helpful for scheduling.
 
 ## 3. Root Cause Analysis
 
-The pod's memory request (8Gi) exceeds the node's allocatable memory (8057048Ki ≈ 8Gi) on both nodes, causing the pod to be unschedulable due to insufficient memory. The node's allocatable memory is 8Gi (8057048Ki), but the pod requests 8Gi, which is slightly above the node's capacity (likely due to rounding or precision differences in Kubernetes). Additionally, the pod has tolerations for node taints, but the nodes have untolerated taints preventing scheduling.
+No node can satisfy the pod's resource requests: 0/2 nodes are available: 1 Insufficient cpu, 1 Insufficient memory, 1 node(s) had untolerated taint(s). no new claims to deallocate, preemption: 0/2 nodes are available: 2 Preemption is not helpful for scheduling.
 
 ### Evidence
 
-- (none)
+- message: 0/2 nodes are available: 1 Insufficient cpu, 1 Insufficient memory, 1 node(s) had untolerated taint(s). no new claims to deallocate, preemption: 0/2 nodes are available: 2 Preemption is not helpful for scheduling.
+- FailedScheduling: 0/2 nodes are available: 1 Insufficient cpu, 1 Insufficient memory, 1 node(s) had untolerated taint(s). no new claims to deallocate, preemption: 0/2 nodes are available: 2 Preemption is not helpful for scheduling.
 
 ## 4. Diagnose (run these first)
 
 ```bash
-kubectl describe pod unschedulable-app-d49957787-jlb9k -n default
-kubectl get events -n default --field-selector involvedObject.name=unschedulable-app-d49957787-jlb9k --sort-by=.lastTimestamp
-kubectl logs unschedulable-app-d49957787-jlb9k -n default --previous --tail=50
+kubectl describe pod unschedulable-app-d49957787-dg94w -n default
+kubectl get events -n default --field-selector involvedObject.name=unschedulable-app-d49957787-dg94w --sort-by=.lastTimestamp
+kubectl logs unschedulable-app-d49957787-dg94w -n default --previous --tail=50
 ```
 
 ## 5. Resolution
 
 **Automated fix (whitelisted, validated):** `patch_resource_limits`
 
-- Arguments: `{'namespace': 'default', 'deployment_name': 'unschedulable-app', 'container_name': 'app', 'memory_request': '3934Mi'}`
-- Why: (Adjusted by guardrail: memory_request capped to 3934Mi -- at most 50% of a node's allocatable.) The pod's memory request (8Gi) is slightly higher than the node's allocatable memory (8Gi). This causes the pod to be unschedulable due to insufficient memory. We need to reduce the memory request to fit within the node's allocatable memory (8Gi). The current request is 8Gi, but the node allocatable memory is 8057048Ki (≈8Gi). We'll reduce the memory request to 7.5Gi to ensure it fits within the node's capacity without causing OOMKills.
+- Arguments: `{'namespace': 'default', 'deployment_name': 'unschedulable-app', 'container_name': 'app', 'cpu_request': '100m', 'memory_request': '128Mi'}`
+- Why: Lower resource requests so the pod fits on the kind nodes.
 
 Apply it with AIops (recommended -- records the result in this SOP):
 
@@ -55,13 +55,12 @@ aiops approve inc-077283
 Or apply the equivalent manually:
 
 ```bash
-kubectl set resources deployment/unschedulable-app -n default -c app --requests=memory=3934Mi
+kubectl set resources deployment/unschedulable-app -n default -c app --requests=cpu=100m,memory=128Mi
 ```
 
 ### Manual remediation steps
 
-- kubectl patch deployment unschedulable-app -p '{"spec": {"template": {"spec": {"containers": [{"name": "app", "resources": {"requests": {"memory": "7500Mi"}}]}}}}}' --type=json
-- kubectl rollout restart deployment unschedulable-app
+- kubectl describe pod unschedulable-app-d49957787-dg94w -n default
 
 ## 6. Verify
 
@@ -80,8 +79,7 @@ kubectl rollout undo deployment/unschedulable-app -n default
 
 ## 8. Prevention
 
-- Always verify memory requests against node allocatable memory before deploying.
-- Use `kubectl describe node` to check allocatable memory for each node.
+- Keep requests within node allocatable; use LimitRange defaults.
 
 ## 9. Timeline
 
@@ -90,6 +88,12 @@ kubectl rollout undo deployment/unschedulable-app -n default
 | 2026-09-22T21:15:52Z | Detected: PendingUnschedulable ({'message': '0/2 nodes are available: 1 Insufficient memory, 1 node(s) had untolerated taint(s). no new claims to deallocate, preemption: 0/2 nodes are available: 2 Preemption is not helpful for scheduling.'}) |
 | 2026-09-22T21:15:52Z | RCA (llm, high): proposed `patch_resource_limits` |
 | 2026-09-22T21:16:23Z | Proposed fix re-checked by request-size guardrail |
+| 2026-09-22T21:32:02Z | Fix applied by operator: `kubectl patch deployment unschedulable-app -n default --type strategic -p {"spec": {"template": {"spec": {"containers": [{"name": "app", "resources": {"requests": {"memory": "3934Mi"}}}]}}}}` |
+| 2026-09-22T21:33:56Z | Resolved: anomaly no longer detected |
+| 2026-09-22T22:13:38Z | Recurred: PendingUnschedulable ({'message': '0/2 nodes are available: 1 Insufficient cpu, 1 Insufficient memory, 1 node(s) had untolerated taint(s). no new claims to deallocate, preemption: 0/2 nodes are available: 2 Preemption is not helpful for scheduling.'}) |
+| 2026-09-22T22:13:38Z | RCA (heuristic, medium): proposed `patch_resource_limits` |
+| 2026-09-22T22:28:19Z | Recurred: PendingUnschedulable ({'message': '0/2 nodes are available: 1 Insufficient cpu, 1 Insufficient memory, 1 node(s) had untolerated taint(s). no new claims to deallocate, preemption: 0/2 nodes are available: 2 Preemption is not helpful for scheduling.'}) |
+| 2026-09-22T22:28:19Z | RCA (heuristic, medium): proposed `patch_resource_limits` |
 
 ---
-*Generated by AIops (`llm` analysis). Review before acting in any non-local environment.*
+*Generated by AIops (`heuristic` analysis). Review before acting in any non-local environment.*

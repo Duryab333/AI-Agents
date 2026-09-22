@@ -7,53 +7,59 @@
 | Severity | high |
 | Category | ImagePullBackOff |
 | Namespace / Workload | `default` / Deployment `bad-image-app` |
-| Pod / Container | `bad-image-app-74fbdf7c75-npwg8` / `app` |
-| First seen / Last seen | 2026-09-22T21:02:44Z / 2026-09-22T21:02:44Z |
+| Pod / Container | `bad-image-app-74fbdf7c75-66xcv` / `app` |
+| First seen / Last seen | 2026-09-22T22:01:39Z / 2026-09-22T22:01:39Z |
 | Detections | 1 |
 | RCA source / confidence | llm / high |
 
 ## 1. Summary
 
-The pod cannot start because it's trying to pull a non-existent image tag. The image name 'nginx:this-tag-does-not-exist-xyz123' is invalid. Manual fix required to correct the image tag in the deployment.
+The pod fails because the specified image tag does not exist. This is a configuration error, not a resource issue. No automated fix is possible; manual correction of the image tag in the deployment is required.
 
 ## 2. Symptoms
 
-- Detection signals: `{'reason': 'ErrImagePull', 'image': 'nginx:this-tag-does-not-exist-xyz123', 'message': 'rpc error: code = NotFound desc = failed to pull and unpack image "docker.io/library/nginx:this-tag-does-not-exist-xyz123": failed to resolve reference "docker.io/library/nginx:this-tag-does-not-exist-xyz123": docker.io/library/nginx:this-tag-does-not-exist-xyz123: not found'}`
+- Detection signals: `{'reason': 'ImagePullBackOff', 'image': 'nginx:this-tag-does-not-exist-xyz123', 'message': 'Back-off pulling image "nginx:this-tag-does-not-exist-xyz123": ErrImagePull: rpc error: code = NotFound desc = failed to pull and unpack image "docker.io/library/nginx:this-tag-does-not-exist-xyz123": failed to resolve reference "docker.io/library/nginx:this-tag-does-not-exist-xyz123": docker.io/library/nginx:this-tag-does-not-exist-xyz123: not found'}`
 - Kubernetes events:
-- FailedScheduling: 0/2 nodes are available: 2 node(s) had untolerated taint(s). no new claims to deallocate, preemption: 0/2 nodes are available: 2 Preemption is not helpful for scheduling.
-- Scheduled: Successfully assigned default/bad-image-app-74fbdf7c75-npwg8 to aiops-worker
+- Scheduled: Successfully assigned default/bad-image-app-74fbdf7c75-66xcv to aiops-worker
+- BackOff: Back-off pulling image "nginx:this-tag-does-not-exist-xyz123"
+- Failed: Error: ImagePullBackOff
 - Pulling: Pulling image "nginx:this-tag-does-not-exist-xyz123"
 - Failed: Failed to pull image "nginx:this-tag-does-not-exist-xyz123": rpc error: code = NotFound desc = failed to pull and unpack image "docker.io/library/nginx:this-tag-does-not-exist-xyz123": failed to resolve reference "docker.io/library/nginx:this-tag-does-not-exist-xyz123": docker.io/library/nginx:this-tag-does-not-exist-xyz123: not found
 - Failed: Error: ErrImagePull
-- BackOff: Back-off pulling image "nginx:this-tag-does-not-exist-xyz123"
-- Failed: Error: ImagePullBackOff
 
 ## 3. Root Cause Analysis
 
-The pod is failing to pull an image that does not exist (nginx:this-tag-does-not-exist-xyz123). This is an ImagePullBackOff error, indicating the image tag is invalid or the registry does not have the image.
+The pod is failing to pull an image that does not exist (nginx:this-tag-does-not-exist-xyz123). The error message explicitly states that the image reference is not found.
 
 ### Evidence
 
-- (none)
+- reason: ImagePullBackOff
+- image: nginx:this-tag-does-not-exist-xyz123
+- message: Back-off pulling image "nginx:this-tag-does-not-exist-xyz123": ErrImagePull: rpc error: code = NotFound desc = failed to pull and unpack image "docker.io/library/nginx:this-tag-does-not-exist-xyz123": failed to resolve reference "docker.io/library/nginx:this-tag-does-not-exist-xyz123": docker.io/library/nginx:this-tag-does-not-exist-xyz123: not found
+- Failed: Error: ImagePullBackOff
+- Pulling: Pulling image "nginx:this-tag-does-not-exist-xyz123"
+- Failed: Failed to pull image "nginx:this-tag-does-not-exist-xyz123": rpc error: code = NotFound desc = failed to pull and unpack image "docker.io/library/nginx:this-tag-does-not-exist-xyz123": failed to resolve reference "docker.io/library/nginx:this-tag-does-not-exist-xyz123": docker.io/library/nginx:this-tag-does-not-exist-xyz123: not found
+- Failed: Error: ErrImagePull
 
 ## 4. Diagnose (run these first)
 
 ```bash
-kubectl describe pod bad-image-app-74fbdf7c75-npwg8 -n default
-kubectl get events -n default --field-selector involvedObject.name=bad-image-app-74fbdf7c75-npwg8 --sort-by=.lastTimestamp
-kubectl logs bad-image-app-74fbdf7c75-npwg8 -n default --previous --tail=50
+kubectl describe pod bad-image-app-74fbdf7c75-66xcv -n default
+kubectl get events -n default --field-selector involvedObject.name=bad-image-app-74fbdf7c75-66xcv --sort-by=.lastTimestamp
+kubectl logs bad-image-app-74fbdf7c75-66xcv -n default --previous --tail=50
 ```
 
 ## 5. Resolution
 
 **No automated fix is safe for this failure** -- a human change is required.
 
-- Why: ImagePullBackOff is caused by an invalid image tag (nginx:this-tag-does-not-exist-xyz123) which does not exist in the registry. No automated Kubernetes tool can fix this; it requires manual correction of the image tag in the deployment configuration.
+- Why: The error indicates a non-existent image tag (nginx:this-tag-does-not-exist-xyz123). This is a configuration error in the image specification, not a resource issue. Automated tools cannot fix image tag errors. The correct fix requires manually correcting the image tag in the deployment spec.
 
 ### Manual remediation steps
 
-- 1. Edit the deployment to use a valid image tag: `kubectl patch deployment bad-image-app -p '{"spec": {"template": {"spec": {"containers": [{"name": "app", "image": "nginx:latest"}]}}}}'`
-- 2. Verify the deployment: `kubectl get deployment bad-image-app -o wide`
+- 1. Check the current deployment configuration: `kubectl get deployment bad-image-app -o yaml`
+- 2. Locate the image field in the deployment spec and replace `nginx:this-tag-does-not-exist-xyz123` with a valid image tag (e.g., `nginx:latest` or `nginx:1.25.3`).
+- 3. Apply the corrected deployment: `kubectl apply -f deployment.yaml`
 
 ## 6. Verify
 
@@ -72,7 +78,7 @@ aiops scan --no-llm   # expect this incident to no longer be reported
 
 ## 8. Prevention
 
-- Always validate image tags before deploying. Use a CI/CD pipeline to check for valid image references.
+- Always verify image tags exist before deploying. Use CI/CD pipelines to validate image tags against a registry before deployment.
 
 ## 9. Timeline
 
@@ -80,6 +86,9 @@ aiops scan --no-llm   # expect this incident to no longer be reported
 |---|---|
 | 2026-09-22T21:02:44Z | Detected: ImagePullBackOff ({'reason': 'ErrImagePull', 'image': 'nginx:this-tag-does-not-exist-xyz123', 'message': 'rpc error: code = NotFound desc = failed to pull and unpack image "docker.io/library/nginx:this-tag-does-not-exist-xyz123": failed to resolve reference "docker.io/library/nginx:this-tag-does-n |
 | 2026-09-22T21:02:44Z | RCA (llm, high): proposed `no_action` |
+| 2026-09-22T21:55:09Z | Resolved: anomaly no longer detected |
+| 2026-09-22T22:01:39Z | Recurred: ImagePullBackOff ({'reason': 'ImagePullBackOff', 'image': 'nginx:this-tag-does-not-exist-xyz123', 'message': 'Back-off pulling image "nginx:this-tag-does-not-exist-xyz123": ErrImagePull: rpc error: code = NotFound desc = failed to pull and unpack image "docker.io/library/nginx:this-tag-does-not-ex |
+| 2026-09-22T22:01:39Z | RCA (llm, high): proposed `no_action` |
 
 ---
 *Generated by AIops (`llm` analysis). Review before acting in any non-local environment.*
